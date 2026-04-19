@@ -47,18 +47,7 @@ Everything is stored in a local SQLite database (`taskflow.db`) that is created 
 
 ## 📸 Screenshots
 
-> Add screenshots to a `docs/screenshots/` folder and reference them here.
-
-```
-docs/
-└── screenshots/
-    ├── tasks.png
-    ├── projects.png
-    ├── finance.png
-    ├── analytics.png
-    ├── progress.png
-    └── ai_assistant.png
-```
+> check images folder
 
 ---
 
