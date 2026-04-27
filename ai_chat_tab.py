@@ -8,7 +8,7 @@ Flow for actions:
   4. User edits fields inline, then clicks Confirm or Cancel
   5. On confirm → execute DB writes
 
-Q&A questions (no action) → just show the AI reply as a bubble.
+Q&A questions (no action) → stream the AI reply word-by-word into a bubble.
 """
 
 import customtkinter as ctk
@@ -53,7 +53,6 @@ SUGGESTED = [
 
 # ─── Two separate prompts — one for Q&A, one for actions ─────────────────────
 
-# Intent classifier remains the same
 CLASSIFY_PROMPT = """\
 You are a classifier. The user message is either:
 - ACTION: user wants to create a project, plan a project, add tasks, or modify data
@@ -64,7 +63,6 @@ Reply with exactly one word: ACTION or QUESTION
 User: {msg}
 Answer:"""
 
-# Q&A prompt remains mostly the same (only small improvement)
 QA_PROMPT = """\
 You are a smart personal assistant inside TaskFlow, a task and finance management app.
 Answer questions clearly, in detail, using bullet points and structure where helpful.
@@ -81,7 +79,6 @@ USER DATA:
 {context}
 """
 
-# ==================== MAIN IMPROVEMENT: ACTION_PROMPT ====================
 ACTION_PROMPT = """\
 You are an action executor inside TaskFlow. Respond with ONLY a valid JSON object — no extra text.
 
@@ -140,7 +137,6 @@ USER DATA (existing projects and tasks):
 """
 
 
-
 def _classify_intent(user_msg: str) -> str:
     """Returns 'ACTION' or 'QUESTION'. Fast single-word call."""
     prompt = CLASSIFY_PROMPT.replace("{msg}", user_msg)
@@ -162,8 +158,11 @@ def _classify_intent(user_msg: str) -> str:
         return "QUESTION"
 
 
-def _call_qa(user_msg: str, context: str, history: list) -> str:
-    """Plain-text Q&A call — returns a string answer."""
+def _stream_qa_tokens(user_msg: str, context: str, history: list):
+    """
+    Generator that yields text tokens from Ollama streaming API.
+    Raises ConnectionError if Ollama is unreachable.
+    """
     today = date.today().isoformat()
     system = QA_PROMPT.replace("{today}", today).replace("{context}", context)
 
@@ -176,7 +175,7 @@ def _call_qa(user_msg: str, context: str, history: list) -> str:
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "prompt": f"{system}\n\n{conv}",
-        "stream": False,
+        "stream": True,
         "options": {"temperature": 0.3, "num_predict": 2048},
     }).encode()
 
@@ -185,8 +184,20 @@ def _call_qa(user_msg: str, context: str, history: list) -> str:
         headers={"Content-Type": "application/json"}, method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            return json.loads(r.read())["response"].strip()
+        with urllib.request.urlopen(req, timeout=120) as response:
+            for line in response:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line.decode("utf-8"))
+                    token = data.get("response", "")
+                    if token:
+                        yield token
+                    if data.get("done", False):
+                        break
+                except json.JSONDecodeError:
+                    continue
     except urllib.error.URLError as e:
         raise ConnectionError(
             f"⚠️ Cannot reach Ollama.\nRun: ollama serve\nThen: ollama pull {OLLAMA_MODEL}\n\nError: {e}"
@@ -245,7 +256,6 @@ def _build_context() -> str:
     for t in tasks:
         proj = f" [Project: {t.get('project_name')}]" if t.get("project_name") else ""
         end_str = t.get("end_date", "") or ""
-        # Flag overdue directly in the task line
         overdue_flag = ""
         if end_str and t["status"] not in ("Completed", "Cancelled"):
             try:
@@ -260,7 +270,6 @@ def _build_context() -> str:
     if not tasks:
         lines.append("  (none)")
 
-    # Dedicated overdue section so the AI never misses it
     overdue = []
     for t in tasks:
         end_str = t.get("end_date", "") or ""
@@ -310,7 +319,6 @@ def _build_context() -> str:
     return "\n".join(lines)
 
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 def _entry(parent, value="", width=None, **kw):
     """Styled inline entry widget."""
@@ -347,11 +355,10 @@ class PlanCard(ctk.CTkFrame):
         self._action  = action
         self._on_confirm = on_confirm
         self._on_cancel  = on_cancel
-        self._task_rows  = []   # list of dicts with entry widgets
+        self._task_rows  = []
         self._build()
 
     def _build(self):
-        # Title bar
         hdr = ctk.CTkFrame(self, fg_color="#1F301F", corner_radius=0)
         hdr.pack(fill="x", padx=0, pady=(0,0))
         _label(hdr, "✦  PLAN PREVIEW — Review & Edit Before Confirming",
@@ -365,7 +372,6 @@ class PlanCard(ctk.CTkFrame):
         elif self._action == "add_task":
             self._build_task_form(body)
 
-        # Confirm / Cancel buttons
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=14, pady=(4, 12))
 
@@ -393,7 +399,6 @@ class PlanCard(ctk.CTkFrame):
         desc = self._plan.get("project_description","")
         if desc: self._proj_desc.insert("1.0", desc)
 
-        # Tasks
         tasks = self._plan.get("tasks", [])
         _label(body, f"TASKS  ({len(tasks)})", color=C["success"], font=("Georgia", 9, "bold")).pack(anchor="w", pady=(0,4))
 
@@ -416,14 +421,11 @@ class PlanCard(ctk.CTkFrame):
         top = ctk.CTkFrame(row_frame, fg_color="transparent")
         top.pack(fill="x", padx=8, pady=(6,2))
 
-        # Index badge
         _label(top, f"#{idx+1}", color=C["accent"], font=("Georgia", 10, "bold")).pack(side="left", padx=(0,8))
 
-        # Title
         title_e = _entry(top, t.get("title",""), font=("Georgia", 11, "bold"))
         title_e.pack(side="left", fill="x", expand=True, padx=(0,6))
 
-        # Delete button
         del_btn = ctk.CTkButton(top, text="✕", width=26, height=26,
                                 fg_color=C["card"], hover_color=C["danger"],
                                 font=("Georgia",10),
@@ -433,7 +435,6 @@ class PlanCard(ctk.CTkFrame):
         mid = ctk.CTkFrame(row_frame, fg_color="transparent")
         mid.pack(fill="x", padx=8, pady=2)
 
-        # Priority
         _label(mid, "Priority:", color=C["subtext"]).pack(side="left", padx=(0,4))
         pri_var = ctk.StringVar(value=t.get("priority","Medium"))
         pri_menu = ctk.CTkOptionMenu(mid, variable=pri_var,
@@ -443,7 +444,6 @@ class PlanCard(ctk.CTkFrame):
                                      dropdown_fg_color=C["card"])
         pri_menu.pack(side="left", padx=(0,10))
 
-        # Category
         _label(mid, "Category:", color=C["subtext"]).pack(side="left", padx=(0,4))
         cat_var = ctk.StringVar(value=t.get("category","General"))
         cat_menu = ctk.CTkOptionMenu(mid, variable=cat_var,
@@ -453,7 +453,6 @@ class PlanCard(ctk.CTkFrame):
                                      dropdown_fg_color=C["card"])
         cat_menu.pack(side="left", padx=(0,10))
 
-        # Start / End dates
         _label(mid, "Start:", color=C["subtext"]).pack(side="left", padx=(0,4))
         start_e = _entry(mid, t.get("start_date", date.today().isoformat()), width=100)
         start_e.pack(side="left", padx=(0,8))
@@ -462,7 +461,6 @@ class PlanCard(ctk.CTkFrame):
         end_e = _entry(mid, t.get("end_date",""), width=100)
         end_e.pack(side="left")
 
-        # Description
         bot = ctk.CTkFrame(row_frame, fg_color="transparent")
         bot.pack(fill="x", padx=8, pady=(2,6))
         _label(bot, "Description:", color=C["subtext"]).pack(anchor="w")
@@ -575,11 +573,9 @@ class PlanCard(ctk.CTkFrame):
             data = self._read_project()
         else:
             data = self._read_task()
-        self.configure(border_color=C["accent"])
         self._on_confirm(self._action, data)
 
     def _cancel(self):
-        self.configure(border_color=C["danger"])
         self._on_cancel()
 
 
@@ -593,7 +589,6 @@ class AIChatTab(ctk.CTkFrame):
 
     # ── Layout ────────────────────────────────────────────────────────────────
     def _build(self):
-        # Header
         hdr = ctk.CTkFrame(self, fg_color="transparent")
         hdr.pack(fill="x", padx=22, pady=(18,4))
         ctk.CTkLabel(hdr, text="AI ASSISTANT", font=("Georgia",20,"bold"),
@@ -602,11 +597,9 @@ class AIChatTab(ctk.CTkFrame):
                       fg_color=C["card2"], hover_color=C["border"],
                       text_color=C["subtext"], command=self._clear).pack(side="right")
 
-        # Model badge
-        ctk.CTkLabel(self, text=f"⬤  Ollama — {OLLAMA_MODEL}  (runs locally, free)",
+        ctk.CTkLabel(self, text=f"⬤ Skadosh — (Kimo's Assistant)",
                      font=("Georgia",10), text_color=C["subtext"]).pack(anchor="w", padx=24, pady=(0,6))
 
-        # Suggested chips
         sug = ctk.CTkFrame(self, fg_color=C["card"], corner_radius=10)
         sug.pack(fill="x", padx=22, pady=(0,8))
         si  = ctk.CTkFrame(sug, fg_color="transparent"); si.pack(fill="x", padx=10, pady=8)
@@ -617,14 +610,13 @@ class AIChatTab(ctk.CTkFrame):
                           text_color=C["subtext"], corner_radius=14,
                           command=lambda q=q: self._send(q)).pack(side="left", padx=3)
 
-        # Chat scroll area
         self.chat_outer = ctk.CTkFrame(self, fg_color=C["card"], corner_radius=14)
         self.chat_outer.pack(fill="both", expand=True, padx=22, pady=(0,8))
         self.chat_scroll = ctk.CTkScrollableFrame(self.chat_outer, fg_color="transparent")
         self.chat_scroll.pack(fill="both", expand=True, padx=6, pady=6)
 
         self._ai_bubble(
-            "👋 Hi Karim!\n\n"
+            "👋 Hi!\n\n"
             "I can answer questions about your data AND take actions:\n"
             "• Ask about finances, tasks, or projects\n"
             "• Say \"Plan a Kitchen Renovation project\" — I'll build a full task plan\n"
@@ -633,7 +625,6 @@ class AIChatTab(ctk.CTkFrame):
             is_welcome=True
         )
 
-        # Input row
         inp = ctk.CTkFrame(self, fg_color=C["card"], corner_radius=12)
         inp.pack(fill="x", padx=22, pady=(0,14))
         ii  = ctk.CTkFrame(inp, fg_color="transparent"); ii.pack(fill="x", padx=12, pady=10)
@@ -669,6 +660,30 @@ class AIChatTab(ctk.CTkFrame):
         bub = ctk.CTkFrame(row, fg_color=C["ai_bg"], corner_radius=12); bub.pack(side="left")
         ctk.CTkLabel(bub, text=text, font=("Georgia",12), text_color=C["text"],
                      wraplength=580, justify="left").pack(padx=14, pady=10)
+
+    def _ai_bubble_streaming(self):
+        """
+        Creates an AI bubble whose text can be updated live.
+        Returns (outer_frame, text_var) — update text_var.set() to stream tokens.
+        """
+        outer = ctk.CTkFrame(self.chat_scroll, fg_color="transparent")
+        outer.pack(fill="x", pady=(2,6), padx=8)
+        row = ctk.CTkFrame(outer, fg_color="transparent")
+        row.pack(side="left", anchor="w", fill="x", expand=True)
+
+        ctk.CTkLabel(row, text="✦", fg_color=C["accent"], text_color="white",
+                     font=("Georgia",13,"bold"), width=30, height=30,
+                     corner_radius=15).pack(side="left", anchor="n", padx=(0,8), pady=4)
+
+        bub = ctk.CTkFrame(row, fg_color=C["ai_bg"], corner_radius=12)
+        bub.pack(side="left", fill="x", expand=True)
+
+        text_var = ctk.StringVar(value="▌")  # blinking cursor placeholder
+        label = ctk.CTkLabel(bub, textvariable=text_var, font=("Georgia",12),
+                             text_color=C["text"], wraplength=580, justify="left")
+        label.pack(padx=14, pady=10, anchor="w")
+
+        return outer, text_var
 
     def _plan_card(self, plan_data: dict, action: str):
         """Render an editable plan card in the chat."""
@@ -729,30 +744,72 @@ class AIChatTab(ctk.CTkFrame):
                 intent = _classify_intent(text)
 
                 if intent == "ACTION":
-                    # Step 2a: action path — returns JSON with plan
+                    # Step 2a: action path — returns JSON with plan (non-streaming)
                     result = _call_action(text, context, self._history[:-1])
                     self.after(0, lambda r=result: self._on_action_response(thinking, r))
                 else:
-                    # Step 2b: Q&A path — returns plain text
-                    reply = _call_qa(text, context, self._history[:-1])
-                    self.after(0, lambda r=reply: self._on_qa_response(thinking, r))
+                    # Step 2b: Q&A path — hand off to main thread to set up streaming bubble
+                    self.after(0, lambda: self._setup_qa_stream(thinking, text, context))
 
             except ConnectionError as e:
                 msg = str(e)
-                self.after(0, lambda m=msg: self._on_qa_response(thinking, m))
+                self.after(0, lambda m=msg: self._on_error_response(thinking, m))
             except Exception as e:
                 msg = f"⚠️ Unexpected error: {e}"
-                self.after(0, lambda m=msg: self._on_qa_response(thinking, m))
+                self.after(0, lambda m=msg: self._on_error_response(thinking, m))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ── Handle Q&A response (plain text) ──────────────────────────────────────
-    def _on_qa_response(self, thinking_widget, reply: str):
+    # ── Streaming Q&A ─────────────────────────────────────────────────────────
+    def _setup_qa_stream(self, thinking_widget, user_msg: str, context: str):
+        """
+        Called on the main thread after classify returns QUESTION.
+        Destroys the thinking bubble, creates a streaming bubble, then
+        launches a background thread that feeds tokens into it.
+        """
+        thinking_widget.destroy()
+
+        _, text_var = self._ai_bubble_streaming()
+        accumulated = [""]   # mutable container so the thread can update it
+        token_count  = [0]
+
+        def stream_worker():
+            try:
+                for token in _stream_qa_tokens(user_msg, context, self._history[:-1]):
+                    accumulated[0] += token
+                    token_count[0] += 1
+                    current = accumulated[0]
+                    # Schedule UI update on main thread
+                    self.after(0, lambda t=current: text_var.set(t))
+                    # Scroll every 10 tokens to avoid excessive redraws
+                    if token_count[0] % 10 == 0:
+                        self.after(0, self._scroll_bottom)
+            except ConnectionError as e:
+                err_msg = str(e)
+                self.after(0, lambda m=err_msg: text_var.set(m))
+            except Exception as e:
+                err_msg = f"⚠️ Unexpected error: {e}"
+                self.after(0, lambda m=err_msg: text_var.set(m))
+            finally:
+                reply = accumulated[0]
+                self.after(0, lambda r=reply: self._finish_qa_stream(r))
+
+        threading.Thread(target=stream_worker, daemon=True).start()
+
+    def _finish_qa_stream(self, reply: str):
+        """Called on the main thread when the stream is complete."""
+        self._busy = False
+        self.send_btn.configure(state="normal", text="Send  ➤")
+        self._history.append({"role":"assistant","content":reply})
+        self._scroll_bottom()
+
+    def _on_error_response(self, thinking_widget, msg: str):
+        """Show an error when classify itself or the action call fails."""
         thinking_widget.destroy()
         self._busy = False
         self.send_btn.configure(state="normal", text="Send  ➤")
-        self._ai_bubble(reply)
-        self._history.append({"role":"assistant","content":reply})
+        self._ai_bubble(msg)
+        self._history.append({"role":"assistant","content":msg})
         self._scroll_bottom()
 
     # ── Handle action response (JSON with plan) ────────────────────────────────
@@ -773,13 +830,22 @@ class AIChatTab(ctk.CTkFrame):
             self._ai_bubble("📋 Here's my plan — edit any field then confirm:")
             self._plan_card(plan, action)
         elif not plan:
-            # Action classified but no plan returned — treat as Q&A fallback
             pass
 
         self._scroll_bottom()
 
     # ── Confirm / Cancel ──────────────────────────────────────────────────────
     def _on_confirm(self, card_outer, action: str, data: dict):
+        # Destroy the card and replace with a compact "Saved" label
+        for widget in card_outer.winfo_children():
+            widget.destroy()
+        saved_frame = ctk.CTkFrame(card_outer, fg_color=C["confirm"],
+                                   corner_radius=10, border_width=1,
+                                   border_color=C["success"])
+        saved_frame.pack(fill="x")
+        ctk.CTkLabel(saved_frame, text="✅  Saved",
+                     font=("Georgia", 12, "bold"), text_color=C["success"]).pack(pady=10, padx=16)
+
         try:
             if action == "create_project":
                 self._execute_create_project(data)
@@ -790,6 +856,16 @@ class AIChatTab(ctk.CTkFrame):
         self._scroll_bottom()
 
     def _on_cancel(self, card_outer):
+        # Destroy the card and replace with a compact "Cancelled" label
+        for widget in card_outer.winfo_children():
+            widget.destroy()
+        cancel_frame = ctk.CTkFrame(card_outer, fg_color=C["card2"],
+                                    corner_radius=10, border_width=1,
+                                    border_color=C["danger"])
+        cancel_frame.pack(fill="x")
+        ctk.CTkLabel(cancel_frame, text="✕  Cancelled",
+                     font=("Georgia", 12, "bold"), text_color=C["danger"]).pack(pady=10, padx=16)
+
         self._ai_bubble("Okay, cancelled. Let me know if you'd like to try again or change anything.")
         self._scroll_bottom()
 
@@ -848,7 +924,6 @@ class AIChatTab(ctk.CTkFrame):
             self._ai_bubble("❌ Task title is empty — nothing was saved.")
             return
 
-        # Resolve project
         pid = None
         proj_name = data.get("project_name","")
         if proj_name and proj_name != "None":
