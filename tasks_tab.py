@@ -191,13 +191,54 @@ class TasksTab(ctk.CTkFrame):
         if self.active_cat!="All": f["category"]=self.active_cat
         return f
 
+    def _parse_date(self, d):
+        """Safely parse a date string (YYYY-MM-DD) into a date object, or return None."""
+        if not d:
+            return None
+        try:
+            return date.fromisoformat(d)
+        except (ValueError, TypeError):
+            return None
+
     def load_tasks(self):
         for w in self.scroll.winfo_children(): w.destroy()
-        tasks=db.get_tasks(self.get_filters())
-        if not tasks:
-            ctk.CTkLabel(self.scroll,text="No tasks found. Add your first task! ✦",
-                         font=("Georgia",14),text_color=COLORS["subtext"]).pack(pady=50); return
-        for t in tasks: self._task_card(t)
+        tasks = db.get_tasks(self.get_filters())
+
+        from_date = self.from_dp.get_date()
+        to_date   = self.to_dp.get_date()
+
+        # Ensure from_date <= to_date (swap silently if reversed)
+        if from_date > to_date:
+            from_date, to_date = to_date, from_date
+
+        visible = []
+        for t in tasks:
+            start = self._parse_date(t["start_date"])
+            end   = self._parse_date(t["end_date"])
+
+            # Undated tasks (no start AND no end) are always shown
+            if start is None and end is None:
+                visible.append(t)
+                continue
+
+            # A task is visible when its date window overlaps [from_date, to_date].
+            # Task window: [start or -∞,  end or +∞]
+            # Overlap fails when the task ends before the range starts,
+            # or the task starts after the range ends.
+            ends_before_range  = (end   is not None and end   < from_date)
+            starts_after_range = (start is not None and start > to_date)
+
+            if ends_before_range or starts_after_range:
+                continue
+
+            visible.append(t)
+
+        if not visible:
+            ctk.CTkLabel(self.scroll, text="No tasks found. Add your first task! ✦",
+                         font=("Georgia",14), text_color=COLORS["subtext"]).pack(pady=50)
+            return
+        for t in visible:
+            self._task_card(t)
 
     def _task_card(self,t):
         card=ctk.CTkFrame(self.scroll,fg_color=COLORS["card"],corner_radius=12); card.pack(fill="x",pady=5)
