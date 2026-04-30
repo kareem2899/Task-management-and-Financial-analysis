@@ -181,6 +181,15 @@ class FinanceTab(ctk.CTkFrame):
         if self.filter_month: f["month"]=self.filter_month
         return f
 
+    def _parse_date(self, d):
+        """Safely parse a YYYY-MM-DD string into a date object, or return None."""
+        if not d:
+            return None
+        try:
+            return date.fromisoformat(d)
+        except (ValueError, TypeError):
+            return None
+
     def load_transactions(self):
         for w in self.summary_frame.winfo_children(): w.destroy()
         income,expense,_,_,_,_,_=db.get_finance_stats(self.filter_month)
@@ -191,10 +200,32 @@ class FinanceTab(ctk.CTkFrame):
             ctk.CTkLabel(card,text=f"EGP {val:,.2f}",font=("Georgia",15,"bold"),text_color=color).pack(pady=(0,10))
 
         for w in self.scroll.winfo_children(): w.destroy()
-        txns=db.get_transactions(self.get_filters())
-        if not txns:
-            ctk.CTkLabel(self.scroll,text="No transactions found. Add income or expense! ✦",font=("Georgia",14),text_color=COLORS["subtext"]).pack(pady=50); return
-        for t in txns: self._txn_card(t)
+        txns = db.get_transactions(self.get_filters())
+
+        from_date = self.from_dp.get_date()
+        to_date   = self.to_dp.get_date()
+
+        # Ensure from_date <= to_date (swap silently if reversed)
+        if from_date > to_date:
+            from_date, to_date = to_date, from_date
+
+        # Filter transactions: each has a single date field.
+        # Show only transactions whose date falls within [from_date, to_date].
+        # Transactions with no date are always shown (shouldn't happen, but safe).
+        visible = []
+        for t in txns:
+            txn_date = self._parse_date(t["date"])
+            if txn_date is None:
+                visible.append(t)
+                continue
+            if from_date <= txn_date <= to_date:
+                visible.append(t)
+
+        if not visible:
+            ctk.CTkLabel(self.scroll,text="No transactions found. Add income or expense! ✦",font=("Georgia",14),text_color=COLORS["subtext"]).pack(pady=50)
+            return
+        for t in visible:
+            self._txn_card(t)
 
     def _txn_card(self,t):
         is_inc=t["type"]=="income"; color=COLORS["success"] if is_inc else COLORS["danger"]
